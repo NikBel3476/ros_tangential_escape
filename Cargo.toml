@@ -9,3 +9,4 @@ edition = "2021"
 rosrust = "0.9"
 rosrust_msg = "0.1"
 once_cell = "1.18"
+tf_rosrust = { git = "https://github.com/smilerobotics/tf_rosrust.git" }

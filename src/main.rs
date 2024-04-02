@@ -7,10 +7,11 @@ use std::env;
 use std::f64::consts::PI;
 use std::sync::Mutex;
 
-const U_MAX: f64 = 0.2;
+const LIDAR_POINT_COUNT: usize = 1147;
+const U_MAX: f64 = 0.1;
 const K_W: f64 = 0.5;
-const DELTA: f64 = 0.1;
-const D_MIN: f64 = 0.5;
+const DELTA: f64 = 0.05;
+const D_MIN: f64 = 0.25;
 
 // static mut current_pose: Box<PoseWithCovariance> = Box::new(PoseWithCovariance::default());
 static CURRENT_POSE: Lazy<Mutex<Option<PoseWithCovariance>>> = Lazy::new(|| Mutex::new(None));
@@ -41,7 +42,7 @@ fn main() {
     })
     .unwrap();
 
-    let lidar_sub = rosrust::subscribe("m2wr/laser/scan", 10, |scan: LaserScan| {
+    let lidar_sub = rosrust::subscribe("scan", 10, |scan: LaserScan| {
         let mut laser_scan = LASER_SCAN.lock().unwrap();
         *laser_scan = Some(scan);
     })
@@ -56,6 +57,7 @@ fn main() {
     let mut p_current = p(x, y).unwrap();
     let mut a_current = a(x, y).unwrap();
     while p(x, y).unwrap() > DELTA {
+        // let (goal_x, goal_y) = (x, y);
         let (goal_x, goal_y) = match b() {
             Some(beta) => {
                 let phi = beta.signum() * PI / 2.0 - (beta - a(x, y).unwrap());
@@ -71,7 +73,7 @@ fn main() {
         let w = K_W * a_current
             + U_MAX * p_current.tanh() * a_current.sin() * a_current.cos() / p_current;
 
-        // ros_info!("p: {p_current}, a: {a_current}, u: {u}, w: {w}");
+        ros_info!("p: {p_current}, a: {a_current}, u: {u}, w: {w}");
 
         cmd_vel_pub
             .send(geometry_msgs::Twist {
@@ -113,7 +115,13 @@ fn get_robot_angle() -> Option<f64> {
 
 fn get_angle_from_pose(pose: &PoseWithCovariance) -> f64 {
     // (pose.pose.orientation.z.asin() * 2.0 * 180.0 / PI).to_radians()
-    (pose.pose.orientation.z.atan2(pose.pose.orientation.w) * 2.0 * 180.0 / PI).to_radians()
+    let angle =
+        (pose.pose.orientation.z.atan2(pose.pose.orientation.w) * 2.0 * 180.0 / PI).to_radians();
+    if angle < -PI {
+        2.0 * PI + angle
+    } else {
+        angle
+    }
 }
 
 /// Distance between current robot position and point
@@ -135,6 +143,8 @@ fn a(goal_x: f64, goal_y: f64) -> Result<f64, &'static str> {
             let angle_to_goal =
                 (goal_y - pose.pose.position.y).atan2(goal_x - pose.pose.position.x);
             let robot_current_angle = get_robot_angle().unwrap();
+
+            ros_info!("goal: {angle_to_goal}, robot_angle: {robot_current_angle}");
             Ok(angle_to_goal - robot_current_angle)
         }
         _ => Err("Cannot get robot position"),
@@ -143,16 +153,21 @@ fn a(goal_x: f64, goal_y: f64) -> Result<f64, &'static str> {
 
 fn b() -> Option<f64> {
     let laser_scan = LASER_SCAN.lock().unwrap().clone().unwrap();
-    let mut min_range = laser_scan.ranges[0] as f64;
+    let points_at_left_side = &laser_scan.ranges[..(LIDAR_POINT_COUNT / 4)];
+    let points_at_right_side =
+        &laser_scan.ranges[(laser_scan.ranges.len() - LIDAR_POINT_COUNT / 4 - 1)..];
+
+    let ranges = [points_at_right_side, points_at_left_side].concat();
+    let mut min_range = ranges[0] as f64;
     let mut index_of_min_range = None;
-    for (i, range) in laser_scan.ranges.iter().enumerate() {
+    for (i, range) in ranges.iter().enumerate() {
         if *range as f64 <= D_MIN && (*range as f64) < min_range {
             min_range = *range as f64;
             index_of_min_range = Some(i);
         }
     }
     if let Some(i) = index_of_min_range {
-        let angle = i as f64 * PI / 720.0;
+        let angle = i as f64 * 2.0 * PI / LIDAR_POINT_COUNT as f64;
         return match angle > PI / 2.0 {
             true => Some(angle - PI / 2.0),
             false => Some(-PI / 2.0 + angle),
@@ -160,6 +175,26 @@ fn b() -> Option<f64> {
     }
     None
 }
+
+// fn b() -> Option<f64> {
+//     let laser_scan = LASER_SCAN.lock().unwrap().clone().unwrap();
+//     let mut min_range = laser_scan.ranges[0] as f64;
+//     let mut index_of_min_range = None;
+//     for (i, range) in laser_scan.ranges.iter().enumerate() {
+//         if *range as f64 <= D_MIN && (*range as f64) < min_range {
+//             min_range = *range as f64;
+//             index_of_min_range = Some(i);
+//         }
+//     }
+//     if let Some(i) = index_of_min_range {
+//         let angle = i as f64 * PI / 720.0;
+//         return match angle > PI / 2.0 {
+//             true => Some(angle - PI / 2.0),
+//             false => Some(-PI / 2.0 + angle),
+//         };
+//     }
+//     None
+// }
 
 fn rotate_point(x: f64, y: f64, angle: f64) -> (f64, f64) {
     (
